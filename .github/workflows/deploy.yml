@@ -1,12 +1,14 @@
 name: CD - Deploy Worker
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'backend/**'
-      - 'wrangler.toml'
-      - '.github/workflows/deploy.yml'
+  workflow_dispatch: # Manual trigger only for now
+  # Uncomment below when secrets are configured
+  # push:
+  #   branches: [ main ]
+  #   paths:
+  #     - 'backend/**'
+  #     - 'wrangler.toml'
+  #     - '.github/workflows/deploy.yml'
 
 jobs:
   deploy:
