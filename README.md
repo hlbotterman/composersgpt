@@ -6,14 +6,6 @@
 
 Une application web pour converser avec les plus grands compositeurs de l'histoire de la musique.
 
-[![Tests](https://img.shields.io/badge/tests-25%20passing-brightgreen)](#-tests)
-[![Vitest](https://img.shields.io/badge/tested%20with-Vitest-6E9F18)](https://vitest.dev/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](#-licence)
-[![JavaScript](https://img.shields.io/badge/javascript-vanilla-yellow)](https://developer.mozilla.org/fr/docs/Web/JavaScript)
-[![Groq](https://img.shields.io/badge/powered%20by-Groq-orange)](https://groq.com/)
-
-[Démo en ligne](#) • [Installation](#-installation) • [Documentation](#-fonctionnalités)
-
 </div>
 
 ---
