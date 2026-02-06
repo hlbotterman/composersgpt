@@ -38,7 +38,7 @@ Une application web pour converser avec les plus grands compositeurs de l'histoi
 ### 1. Cloner le projet
 
 ```bash
-git clone https://github.com/votre-username/composersgpt.git
+git clone https://github.com/hlbotterman/composersgpt.git
 cd composersgpt
 ```
 
@@ -176,7 +176,7 @@ npm run test:coverage
 
 ### Avec Worker (Recommandé)
 
-1. Créez `backend/.dev.vars` :
+1. Créez `.dev.vars` :
 
 ```bash
 GROQ_API_KEY=votre_cle_groq_ici
@@ -185,7 +185,6 @@ GROQ_API_KEY=votre_cle_groq_ici
 2. Lancez le Worker local :
 
 ```bash
-cd backend
 wrangler dev
 ```
 
