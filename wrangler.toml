@@ -5,7 +5,7 @@ compatibility_date = "2024-01-01"
 # KV Namespace pour le rate limiting
 [[kv_namespaces]]
 binding = "RATE_LIMIT_KV"
-id = "placeholder" # Sera créé automatiquement au premier déploiement
+id = "2c08a97b6feb4baba31e452c927a5b9b"
 
 # Variables d'environnement (seront définies via Cloudflare dashboard ou wrangler secret)
 # Ne pas mettre les valeurs réelles ici !
