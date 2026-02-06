@@ -1,0 +1,96 @@
+name: CI - Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Generate coverage report
+        run: npm run test:coverage
+
+      - name: Upload coverage to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
+
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const coverage = fs.readFileSync('coverage/coverage-summary.json', 'utf8');
+            const { total } = JSON.parse(coverage);
+
+            const comment = `## 📊 Test Coverage Report
+
+            | Metric | Coverage |
+            |--------|----------|
+            | Lines | ${total.lines.pct}% |
+            | Statements | ${total.statements.pct}% |
+            | Functions | ${total.functions.pct}% |
+            | Branches | ${total.branches.pct}% |
+
+            ✅ All tests passed!`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  lint:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check file structure
+        run: |
+          echo "✓ Checking project structure..."
+          test -f "index.html" || (echo "❌ index.html missing" && exit 1)
+          test -f "js/config.js" || (echo "❌ js/config.js missing" && exit 1)
+          test -f "backend/worker.js" || (echo "❌ backend/worker.js missing" && exit 1)
+          test -d "js/app" || (echo "❌ js/app directory missing" && exit 1)
+          echo "✅ Project structure OK"
+
+      - name: Check for sensitive data
+        run: |
+          echo "✓ Checking for sensitive data leaks..."
+          if grep -r "gsk_" --include="*.js" --include="*.json" --exclude-dir=node_modules .; then
+            echo "❌ Found API keys in tracked files!"
+            exit 1
+          fi
+          echo "✅ No sensitive data found"

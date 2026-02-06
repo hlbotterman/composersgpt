@@ -6,6 +6,13 @@
 
 Une application web pour converser avec les plus grands compositeurs de l'histoire de la musique.
 
+[![CI Tests](https://github.com/hlbotterman/composersgpt/workflows/CI%20-%20Tests/badge.svg)](https://github.com/hlbotterman/composersgpt/actions)
+[![CD Deploy](https://github.com/hlbotterman/composersgpt/workflows/CD%20-%20Deploy%20Worker/badge.svg)](https://github.com/hlbotterman/composersgpt/actions)
+[![Tests](https://img.shields.io/badge/tests-25%20passing-brightgreen)](#-tests)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](#-licence)
+
+[Démo en ligne](https://hlbotterman.github.io/composersgpt/) • [Documentation](#-installation) • [CI/CD Setup](.github/SETUP_CICD.md)
+
 </div>
 
 ---
