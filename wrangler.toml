@@ -1,0 +1,14 @@
+name = "composersgpt-api"
+main = "backend/worker.js"
+compatibility_date = "2024-01-01"
+
+# KV Namespace pour le rate limiting
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "placeholder" # Sera créé automatiquement au premier déploiement
+
+# Variables d'environnement (seront définies via Cloudflare dashboard ou wrangler secret)
+# Ne pas mettre les valeurs réelles ici !
+
+[env.production]
+# Les secrets seront ajoutés via: wrangler secret put GROQ_API_KEY

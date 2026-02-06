@@ -1,0 +1,39 @@
+# API Keys et secrets
+.dev.vars
+.env
+.env.local
+.env.production
+
+# Wrangler
+.wrangler/
+
+# Node modules
+node_modules/
+
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.claude
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Cache
+.cache/
+.temp/
+*.tmp
+
+# Test coverage
+coverage/
+.vitest/

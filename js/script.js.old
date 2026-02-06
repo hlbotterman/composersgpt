@@ -1,0 +1,1989 @@
+// ============================================
+// CompositeursGPT — Main JavaScript
+// ============================================
+
+// DOM Elements
+// New Chat references
+let newChatBtn, modalOverlay, newChatModal, closeNewChat, newChatSearchInput, frequentList, modalComposerList;
+
+const sidebar = document.getElementById('sidebar');
+const composerList = document.getElementById('composerList');
+const chatPanel = document.getElementById('chatPanel');
+const emptyState = document.getElementById('emptyState');
+const chatSection = document.getElementById('chatSection');
+const messagesContainer = document.getElementById('messagesContainer');
+const messages = document.getElementById('messages');
+const userInput = document.getElementById('userInput');
+const sendBtn = document.getElementById('sendBtn');
+const backBtn = document.getElementById('backBtn');
+const currentAvatar = document.getElementById('currentAvatar');
+const currentName = document.getElementById('currentName');
+const currentDates = document.getElementById('currentDates');
+const summaryToggle = document.getElementById('summaryToggle');
+const summaryPanel = document.getElementById('summaryPanel');
+const summaryContent = document.getElementById('summaryContent');
+const summaryClose = document.getElementById('summaryClose');
+const menuBtn = document.getElementById('menuBtn');
+const dropdownMenu = document.getElementById('dropdownMenu');
+const exportConversationBtn = document.getElementById('exportConversationBtn');
+const clearConversationBtn = document.getElementById('clearConversationBtn');
+const currentComposerHeader = document.getElementById('currentComposerHeader');
+const profileModal = document.getElementById('profileModal');
+const profileOverlay = document.getElementById('profileOverlay');
+const profileClose = document.getElementById('profileClose');
+const profileAvatar = document.getElementById('profileAvatar');
+const profileName = document.getElementById('profileName');
+const profileDates = document.getElementById('profileDates');
+const profileTags = document.getElementById('profileTags');
+const profileDescription = document.getElementById('profileDescription');
+
+// State
+let currentComposer = null;
+let conversationHistory = [];
+let isLoading = false;
+let mediaRecorder = null;
+let audioChunks = [];
+let isRecording = false;
+
+// File Upload State
+let attachedFile = null; // { name, content, type }
+
+// Thread/Reply state
+let replyToMessage = null; // { id, content, role } - message being replied to
+let messageIdCounter = 0;
+
+// Group conversation state
+let conversationMode = 'single'; // 'single' | 'group'
+let selectedComposers = []; // max 3 composers for group mode
+let groupConversationHistory = [];
+const MAX_GROUP_COMPOSERS = 3;
+const GROUP_STORAGE_KEY = 'composersgpt_group_conversations';
+
+// ============================================
+// API Configuration
+// ============================================
+const MODEL = 'llama-3.3-70b-versatile';
+const STORAGE_KEY = 'composersgpt_conversations';
+
+// ============================================
+// Local Storage — Conversation Persistence
+// ============================================
+function getAllConversations() {
+    const data = localStorage.getItem(STORAGE_KEY);
+    return data ? JSON.parse(data) : {};
+}
+
+function getConversation(composerId) {
+    const all = getAllConversations();
+    const conversation = all[composerId];
+
+    // Rétrocompatibilité : si c'est un array, le convertir
+    if (Array.isArray(conversation)) {
+        return { history: conversation, summary: null };
+    }
+
+    return conversation || { history: [], summary: null };
+}
+
+function saveConversation(composerId, history, summary = null, resetUnread = false) {
+    const all = getAllConversations();
+    const existing = all[composerId];
+
+    // Calculate unread count
+    let unreadCount = existing?.unreadCount || 0;
+    if (resetUnread) {
+        unreadCount = 0;
+    } else {
+        // If the last message is from assistant and it's not the active composer, increment unread
+        const lastMsg = history[history.length - 1];
+        if (lastMsg && lastMsg.role === 'assistant' && (!currentComposer || currentComposer.id !== composerId)) {
+            unreadCount++;
+        }
+    }
+
+    all[composerId] = {
+        history: history,
+        summary: summary !== null ? summary : (existing?.summary || null),
+        unreadCount: unreadCount,
+        lastUpdated: history.length > 0 ? history[history.length - 1].date : 0
+    };
+
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+}
+
+/**
+ * Compresse automatiquement une conversation trop longue
+ * en générant un résumé des messages anciens
+ */
+async function compressConversationIfNeeded(composerId) {
+    const COMPRESSION_THRESHOLD = 25; // Déclencher compression après 25 messages
+    const MESSAGES_TO_KEEP = 15;      // Garder les 15 derniers messages complets
+    const MESSAGES_TO_SUMMARIZE = 10;  // Résumer les 10 plus anciens
+
+    const conversation = getConversation(composerId);
+    const history = conversation.history;
+
+    // Pas besoin de compression si moins de 25 messages
+    if (history.length < COMPRESSION_THRESHOLD) {
+        return;
+    }
+
+    try {
+        // Messages à résumer (les plus anciens)
+        const toSummarize = history.slice(0, MESSAGES_TO_SUMMARIZE);
+
+        // Créer un texte représentant ces messages
+        const conversationText = toSummarize.map(msg => {
+            const role = msg.role === 'user' ? 'User' : currentComposer.name;
+            return `${role}: ${msg.content}`;
+        }).join('\n\n');
+
+        // Demander à l'IA de résumer
+        const summaryPrompt = `You are an assistant that summarizes conversations. Here is an excerpt from a conversation between a User and ${currentComposer.name}. Create a concise summary (3-5 sentences) of the topics discussed and important information exchanged. Write the summary in the same language as the conversation:
+
+${conversationText}
+
+Résumé :`;
+
+        const response = await callGroqAPIWithPrompt(
+            'You are an assistant that summarizes conversations concisely and faithfully.',
+            summaryPrompt
+        );
+
+        if (response.error || !response.choices?.[0]?.message?.content) {
+            console.warn('Échec de la compression, conservation de tous les messages');
+            return;
+        }
+
+        const newSummary = response.choices[0].message.content.trim();
+
+        // Combiner ancien résumé (si existe) avec le nouveau
+        const finalSummary = conversation.summary
+            ? `${conversation.summary}\n\n[Suite] ${newSummary}`
+            : newSummary;
+
+        // Garder seulement les N derniers messages + le résumé
+        const compressedHistory = history.slice(-MESSAGES_TO_KEEP);
+
+        // Sauvegarder
+        saveConversation(composerId, compressedHistory, finalSummary);
+
+        console.log(`✅ Conversation compressée : ${history.length} → ${compressedHistory.length} messages + résumé`);
+
+        // Mettre à jour l'affichage du résumé
+        updateSummaryDisplay();
+
+    } catch (error) {
+        console.error('Erreur lors de la compression:', error);
+        // En cas d'erreur, ne rien faire (garder tous les messages)
+    }
+}
+
+/**
+ * Met à jour l'affichage du bouton et panneau de résumé
+ */
+function updateSummaryDisplay() {
+    if (!currentComposer) return;
+
+    const conversation = getConversation(currentComposer.id);
+
+    if (conversation.summary) {
+        // Afficher le bouton
+        summaryToggle.classList.remove('hidden');
+
+        // Mettre à jour le contenu du panneau
+        summaryContent.innerHTML = conversation.summary
+            .split('\n\n')
+            .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
+            .join('');
+    } else {
+        // Masquer le bouton et le panneau
+        summaryToggle.classList.add('hidden');
+        summaryPanel.classList.add('hidden');
+        summaryToggle.classList.remove('active');
+    }
+}
+
+/**
+ * Toggle l'affichage du panneau de résumé
+ */
+function toggleSummary() {
+    summaryPanel.classList.toggle('hidden');
+    summaryToggle.classList.toggle('active');
+}
+
+function clearConversation() {
+    if (!currentComposer) return;
+
+    // Confirmation dialog
+    const confirmMsg = conversationMode === 'group'
+        ? 'Effacer cette conversation de groupe ?'
+        : `Effacer la conversation avec ${currentComposer.name} ?`;
+
+    if (!confirm(confirmMsg)) {
+        return;
+    }
+
+    if (conversationMode === 'group') {
+        // Clear group conversation
+        const groupId = getGroupId();
+        const data = localStorage.getItem(GROUP_STORAGE_KEY);
+        const all = data ? JSON.parse(data) : {};
+        delete all[groupId];
+        localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(all));
+
+        groupConversationHistory = [];
+        messages.innerHTML = '';
+
+        // Show welcome message
+        showGroupWelcomeMessage();
+    } else {
+        // Clear solo conversation
+        const all = getAllConversations();
+        delete all[currentComposer.id];
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+
+        conversationHistory = [];
+        messages.innerHTML = '';
+
+        // Hide summary button
+        summaryToggle.classList.add('hidden');
+        summaryPanel.classList.add('hidden');
+
+        // Show welcome message
+        showWelcomeMessage();
+
+        // Update sidebar preview
+        updateComposerPreview(currentComposer.id);
+    }
+
+    // Reset reply state
+    cancelReply();
+}
+
+// ============================================
+// Dropdown Menu (3 dots)
+// ============================================
+
+function toggleDropdownMenu() {
+    dropdownMenu.classList.toggle('hidden');
+    menuBtn.classList.toggle('active');
+}
+
+function closeDropdownMenu() {
+    dropdownMenu.classList.add('hidden');
+    menuBtn.classList.remove('active');
+}
+
+function exportConversation() {
+    if (!currentComposer) return;
+
+    let conversationText = '';
+    let exportData;
+
+    if (conversationMode === 'group') {
+        // Export group conversation
+        const names = selectedComposers.map(c => c.name).join(', ');
+        conversationText = `Conversation de groupe avec ${names}\n`;
+        conversationText += `Date: ${new Date().toLocaleDateString()}\n\n`;
+        conversationText += '═'.repeat(60) + '\n\n';
+
+        groupConversationHistory.forEach(msg => {
+            if (msg.role === 'user') {
+                conversationText += `VOUS:\n${msg.content}\n\n`;
+            } else if (msg.composerId) {
+                const composer = COMPOSERS.find(c => c.id === msg.composerId);
+                conversationText += `${composer?.name || 'Compositeur'}:\n${msg.content}\n\n`;
+            }
+        });
+
+        exportData = {
+            type: 'group',
+            composers: selectedComposers.map(c => ({ id: c.id, name: c.name })),
+            date: new Date().toISOString(),
+            messages: groupConversationHistory
+        };
+    } else {
+        // Export solo conversation
+        const conversation = getConversation(currentComposer.id);
+        conversationText = `Conversation avec ${currentComposer.name}\n`;
+        conversationText += `Date: ${new Date().toLocaleDateString()}\n\n`;
+        conversationText += '═'.repeat(60) + '\n\n';
+
+        if (conversation.summary) {
+            conversationText += `📝 RÉSUMÉ DE LA CONVERSATION:\n${conversation.summary}\n\n`;
+            conversationText += '═'.repeat(60) + '\n\n';
+        }
+
+        conversation.history.forEach(msg => {
+            if (msg.role === 'user') {
+                conversationText += `VOUS:\n${msg.content}\n\n`;
+            } else {
+                conversationText += `${currentComposer.name}:\n${msg.content}\n\n`;
+            }
+        });
+
+        exportData = {
+            type: 'solo',
+            composer: { id: currentComposer.id, name: currentComposer.name },
+            date: new Date().toISOString(),
+            summary: conversation.summary,
+            messages: conversation.history
+        };
+    }
+
+    // Create download link
+    const filename = conversationMode === 'group'
+        ? `conversation_groupe_${new Date().toISOString().split('T')[0]}.txt`
+        : `conversation_${currentComposer.id}_${new Date().toISOString().split('T')[0]}.txt`;
+
+    const blob = new Blob([conversationText], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+
+    // Also offer JSON export
+    const jsonFilename = filename.replace('.txt', '.json');
+    const jsonBlob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const jsonUrl = URL.createObjectURL(jsonBlob);
+
+    setTimeout(() => {
+        const jsonLink = document.createElement('a');
+        jsonLink.href = jsonUrl;
+        jsonLink.download = jsonFilename;
+        jsonLink.click();
+        URL.revokeObjectURL(jsonUrl);
+    }, 100);
+}
+
+// ============================================
+// Composer Profile Modal
+// ============================================
+
+function openProfileModal() {
+    if (!currentComposer) return;
+
+    // Populate profile modal
+    profileAvatar.innerHTML = `<img src="${currentComposer.image}" alt="${currentComposer.name}">`;
+    profileName.textContent = currentComposer.name;
+    profileDates.textContent = currentComposer.dates;
+
+    // Add tags
+    profileTags.innerHTML = currentComposer.tags
+        .map(tag => `<span class="profile-tag">${tag}</span>`)
+        .join('');
+
+    // Add biography
+    profileDescription.textContent = currentComposer.biography || currentComposer.description;
+
+    // Show modal
+    profileModal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeProfileModal() {
+    profileModal.classList.add('hidden');
+    document.body.style.overflow = '';
+}
+
+// ============================================
+// Group Conversation Mode
+// ============================================
+
+function setConversationMode(mode) {
+    conversationMode = mode;
+    selectedComposers = [];
+    groupConversationHistory = [];
+
+    // Update toggle buttons
+    const modeToggle = document.getElementById('modeToggle');
+    if (modeToggle) {
+        modeToggle.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.mode === mode);
+        });
+    }
+
+    // Show/hide group action
+    const groupAction = document.getElementById('groupAction');
+    if (groupAction) {
+        groupAction.classList.toggle('hidden', mode !== 'group');
+    }
+
+    // Update composer list display
+    renderComposerList();
+    updateGroupActionUI();
+
+    // Reset to empty state
+    if (mode === 'group') {
+        emptyState.classList.remove('hidden');
+        chatSection.classList.add('hidden');
+        currentComposer = null;
+    }
+}
+
+function toggleComposerSelection(composerId) {
+    const composer = COMPOSERS.find(c => c.id === composerId);
+    if (!composer) return;
+
+    const index = selectedComposers.findIndex(c => c.id === composerId);
+
+    if (index > -1) {
+        // Remove from selection
+        selectedComposers.splice(index, 1);
+    } else if (selectedComposers.length < MAX_GROUP_COMPOSERS) {
+        // Add to selection
+        selectedComposers.push(composer);
+    }
+
+    renderComposerList();
+    updateGroupActionUI();
+}
+
+function updateGroupActionUI() {
+    const selectedCount = document.getElementById('selectedCount');
+    const startGroupBtn = document.getElementById('startGroupBtn');
+
+    if (selectedCount) {
+        selectedCount.textContent = `${selectedComposers.length}/${MAX_GROUP_COMPOSERS}`;
+    }
+
+    if (startGroupBtn) {
+        startGroupBtn.disabled = selectedComposers.length < 2;
+        startGroupBtn.textContent = 'Commencer';
+    }
+}
+
+function startGroupConversation() {
+    if (selectedComposers.length < 2) return;
+
+    // Load existing group conversation if any
+    const groupId = getGroupId();
+    groupConversationHistory = getGroupConversation(groupId);
+
+    // Update header for group
+    updateGroupHeader();
+
+    // Show chat section
+    emptyState.classList.add('hidden');
+    chatSection.classList.remove('hidden');
+
+    // Render messages
+    messages.innerHTML = '';
+    if (groupConversationHistory.length > 0) {
+        groupConversationHistory.forEach(msg => {
+            if (msg.composerId) {
+                addGroupMessage(msg);
+            } else {
+                addMessage(msg.role, msg.content, msg.id || null, msg.replyToId || null);
+            }
+        });
+    } else {
+        showGroupWelcomeMessage();
+    }
+
+    // On mobile, hide sidebar
+    sidebar.classList.add('sidebar-hidden');
+
+    userInput.focus();
+    scrollToBottom();
+}
+
+function getGroupId() {
+    return selectedComposers.map(c => c.id).sort().join('-');
+}
+
+function getGroupConversation(groupId) {
+    const data = localStorage.getItem(GROUP_STORAGE_KEY);
+    const all = data ? JSON.parse(data) : {};
+    return all[groupId] || [];
+}
+
+function saveGroupConversation() {
+    const groupId = getGroupId();
+    const data = localStorage.getItem(GROUP_STORAGE_KEY);
+    const all = data ? JSON.parse(data) : {};
+    all[groupId] = groupConversationHistory;
+    localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(all));
+}
+
+function updateGroupHeader() {
+    const names = selectedComposers.map(c => c.name.split(' ').pop()).join(' & ');
+    currentName.textContent = names;
+    currentDates.textContent = 'Débat';
+
+    // Show multiple avatars
+    currentAvatar.innerHTML = selectedComposers.map(c =>
+        `<img src="${c.image}" alt="${c.name}" class="group-avatar">`
+    ).join('');
+}
+
+function showGroupWelcomeMessage() {
+    const names = selectedComposers.map(c => c.name).join(', ');
+    const welcomeHtml = `
+        <div class="welcome-message">
+            <h4>Discussion avec ${names}</h4>
+            <p>Posez une question aux compositeurs et observez leur débat.</p>
+            <div class="group-avatars-large">
+                ${selectedComposers.map(c => `
+                    <div class="group-avatar-item">
+                        <img src="${c.image}" alt="${c.name}">
+                        <span>${c.name.split(' ').pop()}</span>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+    messages.innerHTML = welcomeHtml;
+}
+
+function addGroupMessage(message) {
+    // Remove welcome message if present
+    const welcome = messages.querySelector('.welcome-message');
+    if (welcome) welcome.remove();
+
+    // Remove dynamic suggestions
+    removeDynamicSuggestions();
+
+    const composer = COMPOSERS.find(c => c.id === message.composerId);
+    if (!composer) return;
+
+    const id = message.id || generateMessageId();
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'message assistant group-message';
+    messageDiv.dataset.messageId = id;
+    if (message.replyToId) {
+        messageDiv.dataset.replyTo = message.replyToId;
+        messageDiv.classList.add('has-reply-context');
+    }
+
+    // Build reply quote if replying to a message
+    let replyQuoteHtml = '';
+    if (message.replyToId) {
+        const replyToMsg = groupConversationHistory.find(m => m.id === message.replyToId);
+        if (replyToMsg) {
+            const shortContent = replyToMsg.content.length > 80
+                ? replyToMsg.content.substring(0, 80) + '...'
+                : replyToMsg.content;
+            let replyAuthor = 'Compositeur';
+            if (replyToMsg.role === 'user') {
+                replyAuthor = 'Vous';
+            } else if (replyToMsg.composerId) {
+                const replyComposer = COMPOSERS.find(c => c.id === replyToMsg.composerId);
+                if (replyComposer) replyAuthor = replyComposer.name;
+            }
+            replyQuoteHtml = `
+                <div class="reply-quote" data-reply-target="${message.replyToId}">
+                    <span class="reply-author">${replyAuthor}</span>
+                    <span class="reply-text">${shortContent}</span>
+                </div>
+            `;
+        }
+    }
+
+    messageDiv.innerHTML = `
+        <div class="message-avatar">
+            <img src="${composer.image}" alt="${composer.name}">
+        </div>
+        <div class="message-content">
+            <div class="composer-name-badge">${composer.name}</div>
+            ${replyQuoteHtml}
+            <div class="message-text">${formatMessage(message.content)}</div>
+            <button class="reply-btn" data-msg-id="${id}" data-msg-role="assistant" aria-label="Répondre">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M9 14l-5-5 5-5M4 9h10.5a5.5 5.5 0 015.5 5.5v0a5.5 5.5 0 01-5.5 5.5H11"/>
+                </svg>
+                Répondre
+            </button>
+        </div>
+    `;
+
+    messages.appendChild(messageDiv);
+    scrollToBottom();
+
+    return id;
+}
+
+async function sendGroupMessage() {
+    const text = userInput.value.trim();
+    if (!text || isLoading) return;
+
+    // Capture reply context before clearing
+    const currentReplyTo = replyToMessage ? { ...replyToMessage } : null;
+
+    // Clear input and reply state
+    userInput.value = '';
+    userInput.style.height = 'auto';
+    cancelReply();
+
+    // Add user message with thread info
+    const userMsgId = generateMessageId();
+    addMessage('user', text, userMsgId, currentReplyTo?.id);
+    groupConversationHistory.push({
+        role: 'user',
+        content: text,
+        id: userMsgId,
+        replyToId: currentReplyTo?.id || null
+    });
+
+    isLoading = true;
+    sendBtn.disabled = true;
+
+    try {
+        // Each composer responds in sequence
+        for (let i = 0; i < selectedComposers.length; i++) {
+            const composer = selectedComposers[i];
+            const isLast = (i === selectedComposers.length - 1);
+
+            // Show typing indicator for this composer
+            showTypingIndicatorForComposer(composer);
+
+            // Get previous responses in this turn
+            const previousResponses = groupConversationHistory.filter(m =>
+                m.composerId && m.role === 'assistant'
+            ).slice(-selectedComposers.length + 1);
+
+            // Build the prompt for this composer
+            const systemPrompt = buildGroupSystemPrompt(composer, text, previousResponses, isLast);
+
+            // Call API
+            const response = await callGroqAPIWithPrompt(systemPrompt, text);
+            removeTypingIndicator();
+
+            if (response.error) {
+                // Gestion spéciale pour le rate limiting
+                if (response.error.type === 'rate_limit_exceeded') {
+                    const error = new Error(response.error.message || 'Limite de requêtes atteinte');
+                    error.type = 'rate_limit_exceeded';
+                    error.resetTime = response.error.resetTime;
+                    error.retryAfter = response.error.retryAfter;
+                    throw error;
+                }
+                throw new Error(response.error.message || 'Erreur API');
+            }
+
+            const rawContent = response.choices[0].message.content;
+            const { cleanContent, suggestions } = parseSuggestions(rawContent);
+
+            // Add composer's response
+            const assistantMsgId = generateMessageId();
+            const message = {
+                role: 'assistant',
+                composerId: composer.id,
+                content: cleanContent,
+                id: assistantMsgId,
+                replyToId: userMsgId,
+                timestamp: new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+                date: now.getTime()
+            };
+            groupConversationHistory.push(message);
+            addGroupMessage(message);
+
+            // Show suggestions only from last composer
+            if (isLast && suggestions.length > 0) {
+                showDynamicSuggestions(suggestions);
+            }
+
+            // Small delay between responses for effect
+            if (!isLast) {
+                await delay(500);
+            }
+        }
+
+        saveGroupConversation();
+
+    } catch (error) {
+        removeTypingIndicator();
+        console.error('Error:', error);
+
+        let errorMessage;
+
+        // Message personnalisé pour le rate limiting
+        if (error.type === 'rate_limit_exceeded') {
+            const resetDate = error.resetTime ? new Date(error.resetTime) : null;
+            const now = new Date();
+
+            if (resetDate) {
+                const diffMinutes = Math.ceil((resetDate - now) / 1000 / 60);
+                const diffHours = Math.floor(diffMinutes / 60);
+
+                if (diffHours > 0) {
+                    errorMessage = `⏳ **Limite de requêtes atteinte**\n\n${error.message}\n\nRéessayez dans environ ${diffHours}h${diffMinutes % 60}min.`;
+                } else if (diffMinutes > 1) {
+                    errorMessage = `⏳ **Limite de requêtes atteinte**\n\n${error.message}\n\nRéessayez dans ${diffMinutes} minutes.`;
+                } else {
+                    errorMessage = `⏳ **Limite de requêtes atteinte**\n\n${error.message}\n\nRéessayez dans quelques instants.`;
+                }
+            } else {
+                errorMessage = `⏳ **Limite de requêtes atteinte**\n\n${error.message}`;
+            }
+        } else {
+            errorMessage = 'Désolé, une erreur est survenue. ' + error.message;
+        }
+
+        addMessage('assistant', errorMessage);
+    }
+
+    isLoading = false;
+    sendBtn.disabled = false;
+    userInput.focus();
+}
+
+function showTypingIndicatorForComposer(composer) {
+    const typingDiv = document.createElement('div');
+    typingDiv.className = 'message assistant';
+    typingDiv.id = 'typing-indicator';
+    typingDiv.innerHTML = `
+        <div class="message-avatar"><img src="${composer.image}" alt="${composer.name}"></div>
+        <div class="message-content">
+            <div class="composer-name-badge">${composer.name}</div>
+            <div class="typing-indicator">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+        </div>
+    `;
+    messages.appendChild(typingDiv);
+    scrollToBottom();
+}
+
+function buildGroupSystemPrompt(composer, userQuestion, previousResponses, isLast) {
+    const othersNames = selectedComposers
+        .filter(c => c.id !== composer.id)
+        .map(c => c.name)
+        .join(' et ');
+
+    let prompt = composer.systemPrompt;
+
+    // Add group context
+    prompt += `
+
+GROUP DISCUSSION CONTEXT:
+You are participating in a debate with ${othersNames}. The user is asking you a common question.
+- Give YOUR personal point of view in a few paragraphs (not too long, 2-3 paragraphs max).
+- You can refer to other composers present, comment on their styles or eras.
+- Stay respectful but do not hesitate to express artistic disagreements constructively.
+- Be concise to leave room for others.
+- ALWAYS respond in the same language as the user.`;
+
+    // Add previous responses context
+    if (previousResponses.length > 0) {
+        prompt += '\n\nRÉPONSES PRÉCÉDENTES DANS CE DÉBAT :';
+        for (const resp of previousResponses) {
+            const respComposer = COMPOSERS.find(c => c.id === resp.composerId);
+            if (respComposer) {
+                const shortContent = resp.content.length > 300
+                    ? resp.content.substring(0, 300) + '...'
+                    : resp.content;
+                prompt += `\n\n${respComposer.name} : "${shortContent}"`;
+            }
+        }
+        prompt += '\n\nDonne maintenant ta réponse en tenant compte de ce qui a été dit.';
+    }
+
+    // Add suggestion instruction only for last composer
+    if (isLast) {
+        prompt += SUGGESTION_INSTRUCTION;
+    }
+
+    return prompt;
+}
+
+async function callGroqAPIWithPrompt(systemPrompt, userMessage) {
+    const apiMessages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userMessage }
+    ];
+
+    // Utiliser le Worker ou l'API directe selon CONFIG
+    const url = CONFIG.MODE === 'worker' ? CONFIG.WORKER_URL : CONFIG.GROQ_API_URL;
+    const headers = {
+        'Content-Type': 'application/json'
+    };
+
+    // En mode direct, ajouter la clé API (pour dev local uniquement)
+    if (CONFIG.MODE === 'direct') {
+        const apiKey = localStorage.getItem('groq_api_key');
+        if (apiKey) {
+            headers['Authorization'] = `Bearer ${apiKey}`;
+        }
+    }
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({
+            model: MODEL,
+            messages: apiMessages,
+            temperature: 0.8,
+            max_tokens: 1024,
+            top_p: 0.9
+        })
+    });
+
+    const data = await response.json();
+
+    // Gérer le rate limiting
+    if (response.status === 429) {
+        const resetTime = response.headers.get('X-RateLimit-Reset');
+        const retryAfter = response.headers.get('Retry-After');
+
+        return {
+            error: {
+                type: 'rate_limit_exceeded',
+                message: data.error?.message || 'Limite de requêtes atteinte',
+                resetTime: resetTime,
+                retryAfter: retryAfter
+            }
+        };
+    }
+
+    return data;
+}
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================
+// Initialize App
+// ============================================
+function init() {
+    // Re-fetch DOM elements to ensure they are available
+    newChatBtn = document.getElementById('newChatBtn');
+    modalOverlay = document.getElementById('modalOverlay');
+    newChatModal = document.getElementById('newChatModal');
+    closeNewChat = document.getElementById('closeNewChat');
+    newChatSearchInput = document.getElementById('newChatSearchInput');
+    frequentList = document.getElementById('frequentList');
+    modalComposerList = document.getElementById('modalComposerList');
+
+    renderComposerList();
+    setupEventListeners();
+}
+
+// ============================================
+// Render Composer List (Sidebar)
+// ============================================
+function renderComposerList(filterText = '') {
+    const conversations = getAllConversations();
+    const query = filterText.toLowerCase().trim();
+
+    composerList.innerHTML = [...COMPOSERS]
+        .map(composer => {
+            const conversation = conversations[composer.id];
+            const history = Array.isArray(conversation) ? conversation : (conversation?.history || []);
+            
+            // Robust lastUpdated
+            let lastUpdated = 0;
+            if (conversation && !Array.isArray(conversation) && conversation.lastUpdated) {
+                lastUpdated = conversation.lastUpdated;
+            } else if (history.length > 0) {
+                // For old data, use a fallback (e.g., 0 or try to infer from timestamp if it were possible)
+                lastUpdated = history[history.length - 1].date || 0;
+            }
+            
+            return { 
+                ...composer, 
+                lastUpdated, 
+                history, 
+                unreadCount: (!Array.isArray(conversation) ? conversation?.unreadCount : 0) || 0
+            };
+        })
+        .filter(composer => {
+            // Si pas de discussion, ne rien mettre (sauf si on fait une recherche explicite)
+            if (!query && composer.history.length === 0) return false;
+            
+            if (!query) return true;
+            
+            // Search in name and tags
+            const matchesProfile = composer.name.toLowerCase().includes(query) || 
+                                composer.tags.some(tag => tag.toLowerCase().includes(query));
+            if (matchesProfile) return true;
+
+            // Search in conversation history
+            return composer.history.some(msg => msg.content.toLowerCase().includes(query));
+        })
+        .sort((a, b) => b.lastUpdated - a.lastUpdated)
+        .map(composer => {
+        const history = composer.history;
+        const lastMessage = history.length > 0 ? history[history.length - 1] : null;
+        
+        // Teams-style preview
+        const preview = lastMessage
+            ? lastMessage.content.substring(0, 50) + (lastMessage.content.length > 50 ? '...' : '')
+            : '';
+        const timestamp = lastMessage ? (lastMessage.timestamp || '') : '';
+        
+        const isActive = currentComposer && currentComposer.id === composer.id;
+        const isUnread = composer.unreadCount > 0 && !isActive;
+
+        const groupModeClass = conversationMode === 'group' ? 'group-mode' : '';
+        const isSelected = conversationMode === 'group' && selectedComposers.some(c => c.id === composer.id);
+        const selectedClass = isSelected ? 'selected' : '';
+        const unreadClass = isUnread ? 'unread' : '';
+
+        return `
+            <div class="composer-item ${isActive ? 'active' : ''} ${groupModeClass} ${selectedClass} ${unreadClass}" data-id="${composer.id}">
+                ${conversationMode === 'group' ? `
+                    <div class="selection-indicator">
+                        ${isSelected ? `<span class="selection-number">${selectionIndex + 1}</span>` : ''}
+                    </div>
+                ` : ''}
+                <div class="composer-avatar"><img src="${composer.image}" alt="${composer.name}"></div>
+                <div class="composer-item-info">
+                    <div class="composer-item-top">
+                        <span class="composer-item-name">${composer.name}</span>
+                        <span class="composer-item-time">${timestamp}</span>
+                    </div>
+                    <div class="composer-item-bottom">
+                        <div class="composer-item-preview">${preview}</div>
+                        ${isUnread ? `<div class="unread-badge">${composer.unreadCount}</div>` : ''}
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+// ============================================
+// Event Listeners
+// ============================================
+function setupEventListeners() {
+    // Composer selection in sidebar
+    composerList.addEventListener('click', (e) => {
+        const item = e.target.closest('.composer-item');
+        if (item) {
+            if (conversationMode === 'group') {
+                toggleComposerSelection(item.dataset.id);
+            } else {
+                selectComposer(item.dataset.id);
+            }
+        }
+    });
+
+    // Mode toggle (Solo/Group)
+    const modeToggle = document.getElementById('modeToggle');
+    if (modeToggle) {
+        modeToggle.addEventListener('click', (e) => {
+            const btn = e.target.closest('.mode-btn');
+            if (btn) {
+                setConversationMode(btn.dataset.mode);
+            }
+        });
+    }
+
+    // Start group conversation button
+    const startGroupBtn = document.getElementById('startGroupBtn');
+    if (startGroupBtn) {
+        startGroupBtn.addEventListener('click', startGroupConversation);
+    }
+
+    // Back button (mobile only)
+    backBtn.addEventListener('click', goBack);
+
+    // Send message
+    sendBtn.addEventListener('click', sendMessage);
+
+    // Enter to send (Shift+Enter for new line)
+    userInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+
+    // Auto-resize textarea
+    userInput.addEventListener('input', () => {
+        userInput.style.height = 'auto';
+        userInput.style.height = Math.min(userInput.scrollHeight, 150) + 'px';
+    });
+
+    // Search composer
+    const composerSearch = document.getElementById('composerSearch');
+    if (composerSearch) {
+        composerSearch.addEventListener('input', (e) => {
+            renderComposerList(e.target.value);
+        });
+    }
+
+    // Summary toggle
+    summaryToggle.addEventListener('click', toggleSummary);
+    summaryClose.addEventListener('click', () => {
+        summaryPanel.classList.add('hidden');
+        summaryToggle.classList.remove('active');
+    });
+
+    // Menu toggle
+    menuBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleDropdownMenu();
+    });
+
+    // Export conversation
+    exportConversationBtn.addEventListener('click', () => {
+        closeDropdownMenu();
+        exportConversation();
+    });
+
+    // Clear conversation
+    clearConversationBtn.addEventListener('click', () => {
+        closeDropdownMenu();
+        clearConversation();
+    });
+
+    // Profile modal
+    currentAvatar.addEventListener('click', openProfileModal);
+    profileClose.addEventListener('click', closeProfileModal);
+    profileOverlay.addEventListener('click', closeProfileModal);
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+        if (!menuBtn.contains(e.target) && !dropdownMenu.contains(e.target)) {
+            closeDropdownMenu();
+        }
+    });
+
+    // Handle suggestion clicks (using event delegation)
+    messages.addEventListener('click', (e) => {
+        if (e.target.classList.contains('suggestion')) {
+            userInput.value = e.target.textContent;
+            sendMessage();
+        }
+
+        // Handle reply quote clicks - scroll to original message
+        const replyQuote = e.target.closest('.reply-quote');
+        if (replyQuote) {
+            const targetId = replyQuote.dataset.replyTarget;
+            if (targetId) {
+                scrollToMessage(targetId);
+            }
+        }
+
+        // Handle reply button clicks
+        const replyBtn = e.target.closest('.reply-btn');
+        if (replyBtn) {
+            const id = replyBtn.dataset.msgId;
+            const role = replyBtn.dataset.msgRole;
+            // Look up message content from history
+            let content = '';
+            const historyToSearch = conversationMode === 'group' ? groupConversationHistory : conversationHistory;
+            const msg = historyToSearch.find(m => m.id === id);
+            if (msg) {
+                content = msg.content;
+            }
+            selectMessageForReply(id, content, role);
+        }
+    });
+
+    // New Chat Modal listeners
+    if (newChatBtn) {
+        newChatBtn.addEventListener('click', openNewChatModal);
+    }
+    if (closeNewChat) {
+        closeNewChat.addEventListener('click', closeNewChatModal);
+    }
+    if (newChatSearchInput) {
+        newChatSearchInput.addEventListener('input', (e) => {
+            renderModalComposerList(e.target.value);
+        });
+    }
+
+    // Modal composer selection
+    modalComposerList.addEventListener('click', (e) => {
+        const item = e.target.closest('.modal-composer-item');
+        if (item) {
+            selectComposer(item.dataset.id);
+            closeNewChatModal();
+        }
+    });
+
+    frequentList.addEventListener('click', (e) => {
+        const item = e.target.closest('.modal-composer-item');
+        if (item) {
+            selectComposer(item.dataset.id);
+            closeNewChatModal();
+        }
+    });
+
+    // Close modal on Escape or overlay click
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !modalOverlay.classList.contains('hidden')) {
+            closeNewChatModal();
+        }
+    });
+
+    modalOverlay.addEventListener('click', (e) => {
+        if (e.target === modalOverlay) {
+            closeNewChatModal();
+        }
+    });
+
+    // Microphone button
+    const micBtn = document.getElementById('micBtn');
+    if (micBtn) {
+        micBtn.addEventListener('click', toggleRecording);
+    }
+
+    // Attachment buttons
+    const attachBtn = document.getElementById('attachBtn');
+    const fileInput = document.getElementById('fileInput');
+    if (attachBtn && fileInput) {
+        attachBtn.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', handleFileSelect);
+    }
+}
+
+// ============================================
+// Composer Selection
+// ============================================
+function selectComposer(id) {
+    const composer = COMPOSERS.find(c => c.id === id);
+    if (!composer) return;
+
+    currentComposer = composer;
+    
+    // Mark as read
+    const conversation = getConversation(id);
+    conversationHistory = conversation.history;
+    saveConversation(id, conversationHistory, conversation.summary, true);
+    
+    // Close summary panel if open
+    summaryPanel.classList.add('hidden');
+    summaryToggle.classList.remove('active');
+
+    // Update header
+    currentAvatar.innerHTML = `<img src="${currentComposer.image}" alt="${currentComposer.name}">`;
+    currentName.textContent = currentComposer.name;
+    currentDates.textContent = currentComposer.dates;
+
+    // Render messages
+    messages.innerHTML = '';
+    if (conversationHistory.length > 0) {
+        conversationHistory.forEach(msg => {
+            addMessage(msg.role, msg.content, msg.id || null, msg.replyToId || null, msg.timestamp || null);
+        });
+    } else {
+        showWelcomeMessage();
+    }
+
+    // Switch views
+    emptyState.classList.add('hidden');
+    chatSection.classList.remove('hidden');
+
+    // Update summary display
+    updateSummaryDisplay();
+
+    // On mobile, hide sidebar
+    sidebar.classList.add('sidebar-hidden');
+
+    // Update active state in sidebar
+    renderComposerList();
+
+    // Focus input
+    userInput.focus();
+    scrollToBottom();
+}
+
+// ============================================
+// New Discussion Modal Logic
+// ============================================
+function openNewChatModal() {
+    modalOverlay.classList.remove('hidden');
+    newChatSearchInput.value = '';
+    renderFrequentComposers();
+    renderModalComposerList();
+    newChatSearchInput.focus();
+}
+
+function closeNewChatModal() {
+    modalOverlay.classList.add('hidden');
+}
+
+function getMostFrequentComposers() {
+    const conversations = getAllConversations();
+    const stats = COMPOSERS.map(composer => {
+        const conv = conversations[composer.id];
+        const history = Array.isArray(conv) ? conv : (conv?.history || []);
+        return { id: composer.id, count: history.length };
+    });
+
+    // Sort by message count and take top 2
+    return stats
+        .filter(s => s.count > 0)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 2)
+        .map(s => COMPOSERS.find(c => c.id === s.id));
+}
+
+function renderFrequentComposers() {
+    const frequent = getMostFrequentComposers();
+    const section = document.getElementById('frequentSection');
+    
+    if (frequent.length === 0) {
+        section.classList.add('hidden');
+        return;
+    }
+    
+    section.classList.remove('hidden');
+    frequentList.innerHTML = frequent.map(c => renderModalItem(c)).join('');
+}
+
+function renderModalComposerList(filterText = '') {
+    const query = filterText.toLowerCase().trim();
+    modalComposerList.innerHTML = COMPOSERS
+        .filter(c => {
+            if (!query) return true;
+            return c.name.toLowerCase().includes(query) || 
+                   c.tags.some(tag => tag.toLowerCase().includes(query));
+        })
+        .map(c => renderModalItem(c))
+        .join('');
+}
+
+function renderModalItem(composer) {
+    return `
+        <div class="modal-composer-item" data-id="${composer.id}">
+            <div class="modal-composer-avatar">
+                <img src="${composer.image}" alt="${composer.name}">
+            </div>
+            <div class="modal-composer-info">
+                <span class="modal-composer-name">${composer.name}</span>
+                <span class="modal-composer-desc">${composer.description}</span>
+            </div>
+        </div>
+    `;
+}
+
+function goBack() {
+    // On mobile, show sidebar again
+    sidebar.classList.remove('sidebar-hidden');
+    chatSection.classList.add('hidden');
+    emptyState.classList.remove('hidden');
+    currentComposer = null;
+    renderComposerList();
+}
+
+// ============================================
+// Welcome Message
+// ============================================
+function showWelcomeMessage() {
+    const welcomeHtml = `
+        <div class="welcome-message">
+            <h4>Bienvenue dans une conversation avec ${currentComposer.name}</h4>
+            <p>Posez vos questions sur sa musique, sa vie, son époque...</p>
+            <div class="suggestions">
+                ${currentComposer.suggestions.map(s => `
+                    <button class="suggestion">${s}</button>
+                `).join('')}
+            </div>
+        </div>
+    `;
+    messages.innerHTML = welcomeHtml;
+}
+
+// ============================================
+// Message Display
+// ============================================
+function generateMessageId() {
+    return `msg-${Date.now()}-${messageIdCounter++}`;
+}
+
+function addMessage(role, content, messageId = null, replyToId = null, timestamp = null) {
+    // Remove welcome message if present
+    const welcome = messages.querySelector('.welcome-message');
+    if (welcome) welcome.remove();
+
+    // Remove dynamic suggestions before adding new message
+    removeDynamicSuggestions();
+
+    const id = messageId || generateMessageId();
+    const time = timestamp || new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `message ${role}`;
+    messageDiv.dataset.messageId = id;
+    if (replyToId) {
+        messageDiv.dataset.replyTo = replyToId;
+        messageDiv.classList.add('has-reply-context');
+    }
+
+
+    // Build reply quote if replying to a message
+    let replyQuoteHtml = '';
+    if (replyToId) {
+        const replyToMsg = conversationHistory.find(m => m.id === replyToId);
+        if (replyToMsg) {
+            const shortContent = replyToMsg.content.length > 80
+                ? replyToMsg.content.substring(0, 80) + '...'
+                : replyToMsg.content;
+            const replyAuthor = replyToMsg.role === 'user' ? (navigator.language.startsWith('fr') ? 'Vous' : 'You') : currentComposer?.name || 'Composer';
+            replyQuoteHtml = `
+                <div class="reply-quote" data-reply-target="${replyToId}">
+                    <span class="reply-author">${replyAuthor}</span>
+                    <span class="reply-text">${shortContent}</span>
+                </div>
+            `;
+        }
+    }
+
+    messageDiv.innerHTML = `
+        <div class="message-content">
+            ${replyQuoteHtml}
+            <div class="message-text">${formatMessage(content)}</div>
+            <div class="message-footer">
+                <button class="reply-btn" data-msg-id="${id}" data-msg-role="${role}" aria-label="Répondre">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 14l-5-5 5-5M4 9h10.5a5.5 5.5 0 015.5 5.5v0a5.5 5.5 0 01-5.5 5.5H11"/>
+                    </svg>
+                    Répondre
+                </button>
+                <span class="message-time">${time}</span>
+            </div>
+        </div>
+    `;
+
+    messages.appendChild(messageDiv);
+    scrollToBottom();
+
+    return id;
+}
+
+function formatMessage(content) {
+    // Mapping des actions vers des emojis
+    const actionToEmoji = {
+        'rire': '😄', 'laugh': '😄',
+        'sourire': '😊', 'smile': '😊', 'sourit': '😊',
+        'soupir': '😮‍💨', 'sigh': '😮‍💨', 'soupire': '😮‍💨',
+        'enthousiaste': '😃', 'enthusiastic': '😃',
+        'coup de tête': '🙂', 'nod': '🙂',
+        'hochement de tête': '🙂', 'hochement': '🙂', 'hoche la tête': '🙂',
+        'applaudit': '👏', 'applaud': '👏', 'applaudissement': '👏',
+        'réfléchit': '🤔', 'think': '🤔', 'pense': '🤔', 'pensif': '🤔', 'thoughtful': '🤔',
+        'clin d\'œil': '😉', 'wink': '😉',
+        'surprise': '😲', 'surprised': '😲', 'étonné': '😲',
+        'tristesse': '😢', 'sad': '😢', 'triste': '😢', 'pleure': '😢', 'cry': '😢',
+        'émerveillé': '😍', 'amazed': '😍', 'émerveillement': '😍',
+        'joie': '😊', 'joy': '😊', 'joyeux': '😊',
+        'excité': '🤩', 'excited': '🤩', 'excitation': '🤩',
+        'passionné': '🔥', 'passionate': '🔥', 'passion': '🔥',
+        'nostalgique': '🥲', 'nostalgic': '🥲', 'nostalgie': '🥲',
+        'mélancolique': '😔', 'melancholy': '😔', 'mélancolie': '😔',
+        'concentration': '🎯', 'concentrated': '🎯', 'concentré': '🎯',
+        'regard': '👀', 'look': '👀', 'regarde': '👀', 'observe': '👀',
+        'inspiré': '✨', 'inspired': '✨', 'inspiration': '✨'
+    };
+
+    // Remplacer les actions entre astérisques par des emojis
+    let formatted = content.replace(/\*([^*]+)\*/g, (_, action) => {
+        const actionLower = action.toLowerCase().trim();
+
+        // Chercher un emoji correspondant
+        for (const [key, emoji] of Object.entries(actionToEmoji)) {
+            if (actionLower.includes(key)) {
+                return emoji;
+            }
+        }
+
+        // Si pas de correspondance, supprimer l'action
+        return '';
+    });
+
+    // Nettoyer les espaces multiples
+    formatted = formatted.replace(/\s{2,}/g, ' ').trim();
+
+    // Remplacer les retours à la ligne par <br>
+    return formatted.replace(/\n/g, '<br>');
+}
+
+// ============================================
+// Thread/Reply System
+// ============================================
+
+function selectMessageForReply(id, content, role) {
+    // Clear previous selection
+    document.querySelectorAll('.message.reply-selected').forEach(el => {
+        el.classList.remove('reply-selected');
+    });
+
+    // Set the reply target
+    replyToMessage = { id, content, role };
+
+    // Highlight selected message
+    const messageEl = document.querySelector(`[data-message-id="${id}"]`);
+    if (messageEl) {
+        messageEl.classList.add('reply-selected');
+    }
+
+    // Show reply indicator
+    showReplyIndicator();
+
+    // Focus input
+    userInput.focus();
+}
+
+function showReplyIndicator() {
+    // Remove existing indicator
+    hideReplyIndicator();
+
+    if (!replyToMessage) return;
+
+    const shortContent = replyToMessage.content.length > 60
+        ? replyToMessage.content.substring(0, 60) + '...'
+        : replyToMessage.content;
+
+    const author = replyToMessage.role === 'user' ? (navigator.language.startsWith('fr') ? 'Vous' : 'You') : (currentComposer?.name || 'Composer');
+
+    const indicator = document.createElement('div');
+    indicator.className = 'reply-indicator';
+    indicator.innerHTML = `
+        <div class="reply-indicator-content">
+            <span class="reply-indicator-icon">↩</span>
+            <div class="reply-indicator-text">
+                <span class="reply-indicator-author">${navigator.language.startsWith('fr') ? 'Réponse à' : 'Replying to'} ${author}</span>
+                <span class="reply-indicator-preview">${shortContent}</span>
+            </div>
+        </div>
+        <button class="reply-indicator-cancel" aria-label="Annuler la réponse">✕</button>
+    `;
+
+    // Insert before input wrapper
+    const inputArea = document.querySelector('.input-area');
+    const inputWrapper = document.querySelector('.input-wrapper');
+    inputArea.insertBefore(indicator, inputWrapper);
+
+    // Cancel button handler
+    indicator.querySelector('.reply-indicator-cancel').addEventListener('click', cancelReply);
+}
+
+function hideReplyIndicator() {
+    const indicator = document.querySelector('.reply-indicator');
+    if (indicator) indicator.remove();
+}
+
+function cancelReply() {
+    // Clear selection highlight
+    document.querySelectorAll('.message.reply-selected').forEach(el => {
+        el.classList.remove('reply-selected');
+    });
+
+    replyToMessage = null;
+    hideReplyIndicator();
+}
+
+function scrollToMessage(messageId) {
+    const messageEl = document.querySelector(`[data-message-id="${messageId}"]`);
+    if (messageEl) {
+        messageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        messageEl.classList.add('highlight-flash');
+        setTimeout(() => messageEl.classList.remove('highlight-flash'), 1500);
+    }
+}
+
+// ============================================
+// Dynamic Suggestions
+// ============================================
+
+/**
+ * Parse les suggestions du contenu de la réponse
+ * Format attendu: [SUGGESTIONS: "Q1?" | "Q2?" | "Q3?"]
+ */
+function parseSuggestions(content) {
+    const regex = /\[SUGGESTIONS:\s*"([^"]+)"\s*\|\s*"([^"]+)"\s*\|\s*"([^"]+)"\s*\]/i;
+    const match = content.match(regex);
+
+    if (match) {
+        return {
+            cleanContent: content.replace(regex, '').trim(),
+            suggestions: [match[1], match[2], match[3]]
+        };
+    }
+
+    return { cleanContent: content, suggestions: [] };
+}
+
+/**
+ * Affiche les suggestions dynamiques après la réponse
+ */
+function showDynamicSuggestions(suggestions) {
+    // Supprimer les anciennes suggestions dynamiques
+    const existingSuggestions = messages.querySelector('.dynamic-suggestions');
+    if (existingSuggestions) existingSuggestions.remove();
+
+    if (suggestions.length === 0) return;
+
+    const suggestionsDiv = document.createElement('div');
+    suggestionsDiv.className = 'dynamic-suggestions';
+    suggestionsDiv.innerHTML = `
+        <div class="suggestions">
+            ${suggestions.map(s => `<button class="suggestion">${s}</button>`).join('')}
+        </div>
+    `;
+
+    messages.appendChild(suggestionsDiv);
+    scrollToBottom();
+}
+
+/**
+ * Supprime les suggestions dynamiques (appelé avant d'ajouter un nouveau message)
+ */
+function removeDynamicSuggestions() {
+    const existingSuggestions = messages.querySelector('.dynamic-suggestions');
+    if (existingSuggestions) existingSuggestions.remove();
+}
+
+function showTypingIndicator() {
+    const typingDiv = document.createElement('div');
+    typingDiv.className = 'message assistant';
+    typingDiv.id = 'typing-indicator';
+    typingDiv.innerHTML = `
+        <div class="message-content">
+            <div class="typing-indicator">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+        </div>
+    `;
+    messages.appendChild(typingDiv);
+    scrollToBottom();
+}
+
+function removeTypingIndicator() {
+    const typing = document.getElementById('typing-indicator');
+    if (typing) typing.remove();
+}
+
+function scrollToBottom() {
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
+
+// ============================================
+// Send Message & API Call
+// ============================================
+async function sendMessage() {
+    // Route to group message if in group mode
+    if (conversationMode === 'group' && selectedComposers.length >= 2) {
+        return sendGroupMessage();
+    }
+
+    const text = userInput.value.trim();
+    if (!text || isLoading) return;
+
+    // Capture reply and file context before clearing
+    const currentReplyTo = replyToMessage ? { ...replyToMessage } : null;
+    const currentAttachedFile = attachedFile ? { ...attachedFile } : null;
+
+    // Clear input, reply state, and file attachment
+    userInput.value = '';
+    userInput.style.height = 'auto';
+    cancelReply();
+    removeAttachedFile();
+
+    // Add user message with thread info
+    const userMsgId = generateMessageId();
+    const now = new Date();
+    const timestamp = now.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    const date = now.getTime();
+    addMessage('user', text, userMsgId, currentReplyTo?.id, timestamp);
+    conversationHistory.push({
+        role: 'user',
+        content: text,
+        id: userMsgId,
+        replyToId: currentReplyTo?.id || null,
+        timestamp: timestamp,
+        date: date
+    });
+    saveConversation(currentComposer.id, conversationHistory);
+    updateSidebarPreview();
+
+    // Show loading
+    isLoading = true;
+    sendBtn.disabled = true;
+    showTypingIndicator();
+
+    try {
+        const response = await callGroqAPI(text, currentReplyTo, currentAttachedFile);
+        removeTypingIndicator();
+
+        if (response.error) {
+            // Gestion spéciale pour le rate limiting
+            if (response.error.type === 'rate_limit_exceeded') {
+                const error = new Error(response.error.message || 'Limite de requêtes atteinte');
+                error.type = 'rate_limit_exceeded';
+                error.resetTime = response.error.resetTime;
+                error.retryAfter = response.error.retryAfter;
+                throw error;
+            }
+            throw new Error(response.error.message || 'Erreur API');
+        }
+
+        const rawContent = response.choices[0].message.content;
+
+        // Parser les suggestions dynamiques
+        const { cleanContent, suggestions } = parseSuggestions(rawContent);
+
+        // Afficher le message (sans les suggestions)
+        const assistantMsgId = generateMessageId();
+        const now = new Date();
+        const assistantTimestamp = now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+        const date = now.getTime();
+        addMessage('assistant', cleanContent, assistantMsgId, userMsgId, assistantTimestamp);
+
+        // Sauvegarder le contenu complet dans l'historique (pour le contexte LLM)
+        conversationHistory.push({
+            role: 'assistant',
+            content: cleanContent,
+            id: assistantMsgId,
+            replyToId: userMsgId,
+            timestamp: assistantTimestamp,
+            date: date
+        });
+        saveConversation(currentComposer.id, conversationHistory);
+        updateSidebarPreview();
+
+        // Compression automatique si conversation trop longue
+        await compressConversationIfNeeded(currentComposer.id);
+
+        // Afficher les suggestions dynamiques
+        if (suggestions.length > 0) {
+            showDynamicSuggestions(suggestions);
+        }
+
+    } catch (error) {
+        removeTypingIndicator();
+        console.error('Error:', error);
+
+        let errorMessage;
+
+        // Message personnalisé pour le rate limiting
+        if (error.type === 'rate_limit_exceeded') {
+            const resetDate = error.resetTime ? new Date(error.resetTime) : null;
+            const now = new Date();
+
+            if (resetDate) {
+                const diffMinutes = Math.ceil((resetDate - now) / 1000 / 60);
+                const diffHours = Math.floor(diffMinutes / 60);
+
+                if (diffHours > 0) {
+                    errorMessage = `⏳ **Limite de requêtes atteinte**\n\n${error.message}\n\nRéessayez dans environ ${diffHours}h${diffMinutes % 60}min.`;
+                } else if (diffMinutes > 1) {
+                    errorMessage = `⏳ **Limite de requêtes atteinte**\n\n${error.message}\n\nRéessayez dans ${diffMinutes} minutes.`;
+                } else {
+                    errorMessage = `⏳ **Limite de requêtes atteinte**\n\n${error.message}\n\nRéessayez dans quelques instants.`;
+                }
+            } else {
+                errorMessage = `⏳ **Limite de requêtes atteinte**\n\n${error.message}`;
+            }
+        } else if (error.message.includes('401') || error.message.includes('invalid_api_key')) {
+            errorMessage = 'Désolé, une erreur est survenue. Votre clé API semble invalide. Veuillez la vérifier dans les paramètres.';
+        } else {
+            errorMessage = 'Désolé, une erreur est survenue. ' + error.message;
+        }
+
+        addMessage('assistant', errorMessage);
+    }
+
+    isLoading = false;
+    sendBtn.disabled = false;
+    userInput.focus();
+}
+
+async function callGroqAPI(userMessage, replyTo = null, attachedFileMetadata = null) {
+    // Construire le prompt système augmenté avec le contexte RAG, la langue et les suggestions
+    let augmentedSystemPrompt = buildAugmentedSystemPrompt(
+        currentComposer.systemPrompt,
+        userMessage,
+        currentComposer.id
+    );
+
+    // Ajouter le contenu du fichier joint si présent
+    if (attachedFileMetadata) {
+        augmentedSystemPrompt += `
+
+--- CONTENU DU FICHIER JOINT (${attachedFileMetadata.name}) ---
+${attachedFileMetadata.content}
+--- FIN DU FICHIER ---
+
+L'utilisateur t'a envoyé ce fichier pour analyse. Prends-en connaissance et utilise ces informations pour répondre à sa question.`;
+    }
+
+    // Ajouter le résumé de la conversation si disponible
+    const conversation = getConversation(currentComposer.id);
+    if (conversation.summary) {
+        augmentedSystemPrompt += `
+
+RÉSUMÉ DE LA CONVERSATION PRÉCÉDENTE :
+${conversation.summary}
+
+Utilise ce contexte pour maintenir la cohérence avec ce qui a été discuté auparavant.`;
+    }
+
+    // Add reply context to system prompt if replying to a specific message
+    if (replyTo) {
+        const replyAuthor = replyTo.role === 'user' ? "l'utilisateur" : 'toi-même';
+        augmentedSystemPrompt += `
+
+CONTEXTE DE RÉPONSE :
+L'utilisateur répond spécifiquement à ce message précédent (de ${replyAuthor}) :
+"${replyTo.content.substring(0, 300)}${replyTo.content.length > 300 ? '...' : ''}"
+
+Prends en compte ce contexte pour formuler une réponse pertinente et connectée.`;
+    }
+
+    // Convert history to API format (strip extra fields)
+    // On garde les 15 derniers messages au lieu de 10
+    const apiHistory = conversationHistory.slice(-15).map(msg => ({
+        role: msg.role,
+        content: msg.content
+    }));
+
+    const apiMessages = [
+        { role: 'system', content: augmentedSystemPrompt },
+        ...apiHistory
+    ];
+
+    // Utiliser le Worker ou l'API directe selon CONFIG
+    const url = CONFIG.MODE === 'worker' ? CONFIG.WORKER_URL : CONFIG.GROQ_API_URL;
+    const headers = {
+        'Content-Type': 'application/json'
+    };
+
+    // En mode direct, ajouter la clé API (pour dev local uniquement)
+    if (CONFIG.MODE === 'direct') {
+        const apiKey = localStorage.getItem('groq_api_key');
+        if (apiKey) {
+            headers['Authorization'] = `Bearer ${apiKey}`;
+        }
+    }
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({
+            model: MODEL,
+            messages: apiMessages,
+            temperature: 0.8,
+            max_tokens: 1024,
+            top_p: 0.9
+        })
+    });
+
+    const data = await response.json();
+
+    // Gérer le rate limiting
+    if (response.status === 429) {
+        const resetTime = response.headers.get('X-RateLimit-Reset');
+        const retryAfter = response.headers.get('Retry-After');
+
+        return {
+            error: {
+                type: 'rate_limit_exceeded',
+                message: data.error?.message || 'Limite de requêtes atteinte',
+                resetTime: resetTime,
+                retryAfter: retryAfter
+            }
+        };
+    }
+
+    return data;
+}
+
+// ============================================
+// Audio Recording Logic (Whisper)
+// ============================================
+
+async function toggleRecording() {
+    if (isRecording) {
+        stopRecording();
+    } else {
+        await startRecording();
+    }
+}
+
+async function startRecording() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = (event) => {
+            audioChunks.push(event.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            await sendAudioToTranscription(audioBlob);
+            
+            // Stop all tracks to release microphone
+            stream.getTracks().forEach(track => track.stop());
+        };
+
+        mediaRecorder.start();
+        isRecording = true;
+        updateMicUI();
+    } catch (error) {
+        console.error('Microphone access error:', error);
+        alert('Impossible d\'accéder au microphone. Veuillez vérifier les permissions.');
+    }
+}
+
+function stopRecording() {
+    if (mediaRecorder && isRecording) {
+        mediaRecorder.stop();
+        isRecording = false;
+        updateMicUI();
+    }
+}
+
+function updateMicUI() {
+    const micBtn = document.getElementById('micBtn');
+    if (micBtn) {
+        micBtn.classList.toggle('recording', isRecording);
+    }
+}
+
+async function sendAudioToTranscription(blob) {
+    if (isLoading) return;
+    
+    isLoading = true;
+    showTypingIndicator(); // Show indicator while transcribing
+
+    try {
+        const formData = new FormData();
+        formData.append('file', blob, 'audio.webm');
+        formData.append('model', 'whisper-large-v3');
+        // Optionnel: On peut passer la langue de l'utilisateur si on la connaît
+        // formData.append('language', navigator.language.split('-')[0]);
+
+        const url = CONFIG.MODE === 'worker' ? CONFIG.WORKER_URL : 'https://api.groq.com/openai/v1/audio/transcriptions';
+        const headers = {};
+
+        if (CONFIG.MODE === 'direct') {
+            const apiKey = localStorage.getItem('groq_api_key');
+            if (apiKey) {
+                headers['Authorization'] = `Bearer ${apiKey}`;
+            }
+        }
+
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: headers,
+            body: formData
+        });
+
+        const data = await response.json();
+        removeTypingIndicator();
+
+        if (data.text && data.text.trim().length > 0) {
+            userInput.value = data.text;
+            userInput.dispatchEvent(new Event('input')); // Trigger auto-resize
+            
+            // Envoyer automatiquement le message
+            await sendMessage();
+        } else {
+            console.warn('Transcription vide ou erreur:', data);
+        }
+
+    } catch (error) {
+        removeTypingIndicator();
+        console.error('Transcription error:', error);
+        alert('Erreur lors de la transcription vocale.');
+    } finally {
+        isLoading = false;
+    }
+}
+
+// ============================================
+// Document Upload & Analysis Logic
+// ============================================
+
+async function handleFileSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    // Reset input
+    event.target.value = '';
+
+    isLoading = true;
+    showTypingIndicator();
+
+    try {
+        let content = '';
+        if (file.type === 'application/pdf') {
+            content = await extractTextFromPDF(file);
+        } else {
+            // Assume text-based for others (txt, md, js, etc.)
+            content = await file.text();
+        }
+
+        if (content && content.trim()) {
+            attachedFile = {
+                name: file.name,
+                content: content,
+                type: file.type
+            };
+            updateAttachmentUI();
+        } else {
+            alert('Impossible d\'extraire du texte de ce fichier.');
+        }
+    } catch (error) {
+        console.error('File processing error:', error);
+        alert('Erreur lors de la lecture du fichier.');
+    } finally {
+        isLoading = false;
+        removeTypingIndicator();
+    }
+}
+
+async function extractTextFromPDF(file) {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = '';
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const textContent = await page.getTextContent();
+        const pageText = textContent.items.map(item => item.str).join(' ');
+        fullText += pageText + '\n';
+    }
+
+    return fullText;
+}
+
+function updateAttachmentUI() {
+    const preview = document.getElementById('attachmentPreview');
+    if (!preview) return;
+
+    if (attachedFile) {
+        preview.innerHTML = `
+            <div class="file-chip">
+                <span>📄 ${attachedFile.name}</span>
+                <button class="remove-file" onclick="removeAttachedFile()">×</button>
+            </div>
+        `;
+        preview.classList.remove('hidden');
+    } else {
+        preview.innerHTML = '';
+        preview.classList.add('hidden');
+    }
+}
+
+function removeAttachedFile() {
+    attachedFile = null;
+    updateAttachmentUI();
+}
+
+// ============================================
+// Sidebar Preview Update
+// ============================================
+function updateSidebarPreview() {
+    renderComposerList();
+}
+
+// ============================================
+// Start App
+// ============================================
+document.addEventListener('DOMContentLoaded', init);
