@@ -8,7 +8,4 @@ binding = "RATE_LIMIT_KV"
 id = "2c08a97b6feb4baba31e452c927a5b9b"
 
 # Variables d'environnement (seront définies via Cloudflare dashboard ou wrangler secret)
-# Ne pas mettre les valeurs réelles ici !
-
-[env.production]
 # Les secrets seront ajoutés via: wrangler secret put GROQ_API_KEY
